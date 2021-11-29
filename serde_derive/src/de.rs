@@ -1910,20 +1910,23 @@ fn deserialize_generated_identifier(
     let this = quote!(__Field);
     let field_idents: &Vec<_> = &fields.iter().map(|(_, ident, _)| ident).collect();
 
-    let (ignore_variant, fallthrough) = if !is_variant && cattrs.has_flatten() {
-        let ignore_variant = quote!(__other(_serde::__private::de::Content<'de>),);
-        let fallthrough = quote!(_serde::__private::Ok(__Field::__other(__value)));
-        (Some(ignore_variant), Some(fallthrough))
+    let ignore_variant;
+    let fallthrough;
+    if !is_variant && cattrs.has_flatten() {
+        ignore_variant = Some(quote!(__other(_serde::__private::de::Content<'de>),));
+        fallthrough = Some(quote!(_serde::__private::Ok(__Field::__other(__value))));
     } else if let Some(other_idx) = other_idx {
-        let ignore_variant = fields[other_idx].1.clone();
-        let fallthrough = quote!(_serde::__private::Ok(__Field::#ignore_variant));
-        (None, Some(fallthrough))
+        ignore_variant = None;
+        fallthrough = {
+            let other_variant = fields[other_idx].1.clone();
+            Some(quote!(_serde::__private::Ok(__Field::#other_variant)))
+        };
     } else if is_variant || cattrs.deny_unknown_fields() {
-        (None, None)
+        ignore_variant = None;
+        fallthrough = None;
     } else {
-        let ignore_variant = quote!(__ignore,);
-        let fallthrough = quote!(_serde::__private::Ok(__Field::__ignore));
-        (Some(ignore_variant), Some(fallthrough))
+        ignore_variant = Some(quote!(__ignore,));
+        fallthrough = Some(quote!(_serde::__private::Ok(__Field::__ignore)));
     };
 
     let visitor_impl = Stmts(deserialize_identifier(

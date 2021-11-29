@@ -116,7 +116,7 @@ fn check_identifier(cx: &Ctxt, cont: &Container) {
             }
 
             // Variant with `other` attribute must be the last one.
-            (Style::Unit, Identifier::Field, true, _) | (Style::Unit, Identifier::No, true, _) => {
+            (Style::Unit, Identifier::Field, true, _) | (_, Identifier::No, true, _) => {
                 if i < variants.len() - 1 {
                     cx.error_spanned_by(
                         variant.original,
@@ -126,7 +126,7 @@ fn check_identifier(cx: &Ctxt, cont: &Container) {
             }
 
             // Variant with `other` attribute must be a unit variant.
-            (_, Identifier::Field, true, _) | (_, Identifier::No, true, _) => {
+            (_, Identifier::Field, true, _) => {
                 cx.error_spanned_by(
                     variant.original,
                     "#[serde(other)] must be on a unit variant",
