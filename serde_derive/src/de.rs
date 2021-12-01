@@ -2,11 +2,11 @@ use proc_macro2::{Literal, Span, TokenStream};
 use quote::ToTokens;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{self, Ident, Index, Member};
+use syn::{self, Ident, Index, Member, Type};
 
 use bound;
 use dummy;
-use fragment::{Expr, Fragment, Match, Stmts};
+use fragment::{Expr, Fragment, Match, ResultFragment, Stmts};
 use internals::ast::{Container, Data, Field, Style, Variant};
 use internals::{attr, replace_receiver, ungroup, Ctxt, Derive};
 use pretend;
@@ -1172,13 +1172,14 @@ fn prepare_enum_variant_enum(
     variants: &[Variant],
     cattrs: &attr::Container,
 ) -> (TokenStream, Stmts) {
-    let mut deserialized_variants = variants
+    let variants = variants
         .iter()
         .enumerate()
         .filter(|&(_, variant)| !variant.attrs.skip_deserializing());
 
-    let variant_names_idents: Vec<_> = deserialized_variants
+    let variant_name_idents: Vec<_> = variants
         .clone()
+        .filter(|(_, variant)| !variant.attrs.other())
         .map(|(i, variant)| {
             (
                 variant.attrs.name().deserialize_name(),
@@ -1188,20 +1189,25 @@ fn prepare_enum_variant_enum(
         })
         .collect();
 
-    let other_idx = deserialized_variants.position(|(_, variant)| variant.attrs.other());
+    let other_ty = variants
+        .last()
+        .and_then(|(_, variant)| match variant.attrs.other() {
+            true => Some(variant.fields.get(0).map(|f| f.ty)),
+            false => None,
+        });
 
     let variants_stmt = {
-        let variant_names = variant_names_idents.iter().map(|(name, _, _)| name);
+        let variant_names = variant_name_idents.iter().map(|(name, _, _)| name);
         quote! {
             const VARIANTS: &'static [&'static str] = &[ #(#variant_names),* ];
         }
     };
 
     let variant_visitor = Stmts(deserialize_generated_identifier(
-        &variant_names_idents,
+        &variant_name_idents,
         cattrs,
         true,
-        other_idx,
+        other_ty,
     ));
 
     (variants_stmt, variant_visitor)
@@ -1235,8 +1241,17 @@ fn deserialize_externally_tagged_enum(
                 params, variant, cattrs,
             ));
 
+            let field_pat = if variant.attrs.other() {
+                match variant.fields.get(0) {
+                    Some(_) => quote!(__Field::__other(__tag)),
+                    None => quote!(__Field::__other),
+                }
+            } else {
+                quote!(__Field::#variant_name)
+            };
+
             quote! {
-                (__Field::#variant_name, __variant) => #block
+                (#field_pat, __variant) => #block
             }
         });
 
@@ -1704,21 +1719,35 @@ fn deserialize_externally_tagged_variant(
     }
 
     let variant_ident = &variant.ident;
+    let this = &params.this;
+
+    if variant.attrs.other() {
+        match variant.fields.len() {
+            0 => (),
+            1 => {
+                return quote_block! {
+                    try!(_serde::de::VariantAccess::unit_variant(__variant));
+                    _serde::__private::Ok(#this::#variant_ident(__tag))
+                }
+            }
+            2 => {
+                return deserialize_externally_tagged_newtype(params, &variant.fields[1], cattrs)
+                    .map(quote_expr! { |__content| #this::#variant_ident(__tag, __content) })
+                    .into()
+            }
+            _ => unreachable!("Variant length for #[serde(other)] checked in internals"),
+        };
+    }
 
     match variant.style {
-        Style::Unit => {
-            let this = &params.this;
-            quote_block! {
-                try!(_serde::de::VariantAccess::unit_variant(__variant));
-                _serde::__private::Ok(#this::#variant_ident)
-            }
-        }
-        Style::Newtype => deserialize_externally_tagged_newtype_variant(
-            variant_ident,
-            params,
-            &variant.fields[0],
-            cattrs,
-        ),
+        Style::Unit => (quote_result! { (ok block) =>
+            try!(_serde::de::VariantAccess::unit_variant(__variant));
+            #this::#variant_ident
+        })
+        .into(),
+        Style::Newtype => deserialize_externally_tagged_newtype(params, &variant.fields[0], cattrs)
+            .map(quote_expr! { #this::#variant_ident })
+            .into(),
         Style::Tuple => {
             deserialize_tuple(Some(variant_ident), params, &variant.fields, cattrs, None)
         }
@@ -1837,20 +1866,16 @@ fn deserialize_untagged_variant(
     }
 }
 
-fn deserialize_externally_tagged_newtype_variant(
-    variant_ident: &syn::Ident,
+fn deserialize_externally_tagged_newtype(
     params: &Parameters,
     field: &Field,
     cattrs: &attr::Container,
-) -> Fragment {
-    let this = &params.this;
-
+) -> ResultFragment {
     if field.attrs.skip_deserializing() {
-        let this = &params.this;
         let default = Expr(expr_is_missing(field, cattrs));
-        return quote_block! {
+        return quote_result! { (ok block) =>
             try!(_serde::de::VariantAccess::unit_variant(__variant));
-            _serde::__private::Ok(#this::#variant_ident(#default))
+            #default
         };
     }
 
@@ -1860,18 +1885,15 @@ fn deserialize_externally_tagged_newtype_variant(
             let span = field.original.span();
             let func =
                 quote_spanned!(span=> _serde::de::VariantAccess::newtype_variant::<#field_ty>);
-            quote_expr! {
-                _serde::__private::Result::map(#func(__variant), #this::#variant_ident)
-            }
+            quote_result! { (expr) => #func(__variant) }
         }
         Some(path) => {
             let (wrapper, wrapper_ty) = wrap_deserialize_field_with(params, field.ty, path);
-            quote_block! {
+            (quote_result! { (block) =>
                 #wrapper
-                _serde::__private::Result::map(
-                    _serde::de::VariantAccess::newtype_variant::<#wrapper_ty>(__variant),
-                    |__wrapper| #this::#variant_ident(__wrapper.value))
-            }
+                _serde::de::VariantAccess::newtype_variant::<#wrapper_ty>(__variant)
+            })
+            .map(quote_expr! { |__wrapper| __wrapper.value })
         }
     }
 }
@@ -1905,7 +1927,7 @@ fn deserialize_generated_identifier(
     fields: &[(String, Ident, Vec<String>)],
     cattrs: &attr::Container,
     is_variant: bool,
-    other_idx: Option<usize>,
+    other_ty: Option<Option<&Type>>,
 ) -> Fragment {
     let this = quote!(__Field);
     let field_idents: &Vec<_> = &fields.iter().map(|(_, ident, _)| ident).collect();
@@ -1915,12 +1937,24 @@ fn deserialize_generated_identifier(
     if !is_variant && cattrs.has_flatten() {
         ignore_variant = Some(quote!(__other(_serde::__private::de::Content<'de>),));
         fallthrough = Some(quote!(_serde::__private::Ok(__Field::__other(__value))));
-    } else if let Some(other_idx) = other_idx {
-        ignore_variant = None;
-        fallthrough = {
-            let other_variant = fields[other_idx].1.clone();
-            Some(quote!(_serde::__private::Ok(__Field::#other_variant)))
-        };
+    } else if let Some(other_ty) = other_ty {
+        match other_ty {
+            Some(other_ty) => {
+                ignore_variant = Some(quote!(__other(#other_ty)));
+                fallthrough = Some(quote! {
+                    _serde::__private::Result::map(
+                        _serde::Deserialize::deserialize(
+                            _serde::__private::de::IdentifierDeserializer::from(__value)
+                        ),
+                        __Field::__other
+                    )
+                });
+            }
+            None => {
+                ignore_variant = Some(quote!(__other));
+                fallthrough = Some(quote!(_serde::__private::Ok(__Field::__other)));
+            }
+        }
     } else if is_variant || cattrs.deny_unknown_fields() {
         ignore_variant = None;
         fallthrough = None;

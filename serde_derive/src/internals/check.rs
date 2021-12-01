@@ -93,6 +93,15 @@ fn check_identifier(cx: &Ctxt, cont: &Container) {
     };
 
     for (i, variant) in variants.iter().enumerate() {
+        let check_other_last = || {
+            if i < variants.len() - 1 {
+                cx.error_spanned_by(
+                    variant.original,
+                    "#[serde(other)] must be on the last variant",
+                );
+            }
+        };
+
         match (
             variant.style,
             cont.attrs.identifier(),
@@ -115,14 +124,30 @@ fn check_identifier(cx: &Ctxt, cont: &Container) {
                 );
             }
 
-            // Variant with `other` attribute must be the last one.
-            (Style::Unit, Identifier::Field, true, _) | (_, Identifier::No, true, _) => {
-                if i < variants.len() - 1 {
-                    cx.error_spanned_by(
+            // Variant with `other` attribute expects unit, 1-tuple and 2-tuple variants
+            (style, Identifier::No, true, _) => {
+                check_other_last();
+
+                match style {
+                    Style::Unit | Style::Newtype => (),
+                    Style::Tuple => match variant.fields.len() {
+                        1 => unreachable!("1-tuple not in newtype style"),
+                        2 => (),
+                        _ => cx.error_spanned_by(
+                            variant.original,
+                            "#[serde(other)] on tuple variants expects one or two fields",
+                        ),
+                    },
+                    Style::Struct => cx.error_spanned_by(
                         variant.original,
-                        "#[serde(other)] must be on the last variant",
-                    );
+                        "#[serde(other)] must be on a unit or tuple variant",
+                    ),
                 }
+            }
+
+            // Variant with `other` attribute must be the last one.
+            (Style::Unit, Identifier::Field, true, _) => {
+                check_other_last();
             }
 
             // Variant with `other` attribute must be a unit variant.

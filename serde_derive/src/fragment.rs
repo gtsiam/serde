@@ -72,3 +72,71 @@ impl AsRef<TokenStream> for Fragment {
         }
     }
 }
+
+macro_rules! quote_result {
+    ((ok expr) => $($tt:tt)*) => {
+        $crate::fragment::ResultFragment::Ok(quote_expr!($($tt)*))
+    };
+    ((ok block) => $($tt:tt)*) => {
+        $crate::fragment::ResultFragment::Ok(quote_block!($($tt)*))
+    };
+    // ((err expr) => $($tt:tt)*) => {
+    //     $crate::fragment::ResultFragment::Err(quote_expr!($($tt)*))
+    // };
+    // ((err block) => $($tt:tt)*) => {
+    //     $crate::fragment::ResultFragment::Err(quote_block!($($tt)*))
+    // };
+    ((expr) => $($tt:tt)*) => {
+        $crate::fragment::ResultFragment::Dyn(quote_expr!($($tt)*))
+    };
+    ((block) => $($tt:tt)*) => {
+        $crate::fragment::ResultFragment::Dyn(quote_block!($($tt)*))
+    }
+}
+
+pub enum ResultFragment {
+    Ok(Fragment),
+    // Err(Fragment),
+    Dyn(Fragment),
+}
+
+impl ResultFragment {
+    /// Map the result using the provided function. The function can either be a
+    pub fn map(self, func: Fragment) -> Self {
+        let func = Expr(func);
+        match self {
+            ResultFragment::Ok(expr) => ResultFragment::Ok({
+                let expr = Expr(expr);
+                quote_expr! { (#func)(#expr) }
+            }),
+            // ResultFragment::Err(expr) => ResultFragment::Ok({
+            //     let expr = Expr(expr);
+            //     quote_expr! { (#func)(#expr) }
+            // }),
+            ResultFragment::Dyn(expr) => ResultFragment::Dyn({
+                let expr = Expr(expr);
+                quote_expr! { _serde::__private::Result::map(#expr, #func) }
+            }),
+        }
+    }
+}
+
+impl Into<Fragment> for ResultFragment {
+    fn into(self) -> Fragment {
+        match self {
+            ResultFragment::Ok(frag) => {
+                let expr = Expr(frag);
+                quote_expr! {
+                    _serde::__private::Ok(#expr)
+                }
+            }
+            // ResultFragment::Err(frag) => {
+            //     let expr = Expr(frag);
+            //     quote_expr! {
+            //         _serde::__private::Err(#expr)
+            //     }
+            // }
+            ResultFragment::Dyn(frag) => frag,
+        }
+    }
+}
