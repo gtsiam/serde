@@ -1339,8 +1339,17 @@ fn deserialize_internally_tagged_enum(
                 },
             ));
 
+            let field_pat = if variant.attrs.other() {
+                match variant.fields.get(0) {
+                    Some(_) => quote!(__Field::__other(__tag)),
+                    None => quote!(__Field::__other),
+                }
+            } else {
+                quote!(__Field::#variant_name)
+            };
+
             quote! {
-                __Field::#variant_name => #block
+                #field_pat => #block
             }
         });
 
@@ -1732,7 +1741,7 @@ fn deserialize_externally_tagged_variant(
             }
             2 => {
                 return deserialize_externally_tagged_newtype(params, &variant.fields[1], cattrs)
-                    .map(quote_expr! { |__content| #this::#variant_ident(__tag, __content) })
+                    .map(quote_block! { |__content| #this::#variant_ident(__tag, __content) })
                     .into()
             }
             _ => unreachable!("Variant length for #[serde(other)] checked in internals"),
@@ -1774,13 +1783,31 @@ fn deserialize_internally_tagged_variant(
         return deserialize_untagged_variant(params, variant, cattrs, deserializer);
     }
 
+    let this = &params.this;
     let variant_ident = &variant.ident;
+    let type_name = params.type_name();
+    let variant_name = variant.ident.to_string();
+
+    if variant.attrs.other() {
+        match variant.fields.len() {
+            0 => (),
+            1 => {
+                return quote_block! {
+                    try!(_serde::Deserializer::deserialize_any(#deserializer, _serde::__private::de::InternallyTaggedUnitVisitor::new(#type_name, #variant_name)));
+                    _serde::__private::Ok(#this::#variant_ident(__tag))
+                };
+            }
+            2 => {
+                return deserialize_untagged_newtype(&variant.fields[1], &deserializer)
+                    .map(quote_block! { |__content| #this::#variant_ident(__tag, __content) })
+                    .into()
+            }
+            _ => unreachable!("Variant length for #[serde(other)] checked in internals"),
+        }
+    }
 
     match effective_style(variant) {
         Style::Unit => {
-            let this = &params.this;
-            let type_name = params.type_name();
-            let variant_name = variant.ident.to_string();
             let default = variant.fields.get(0).map(|field| {
                 let default = Expr(expr_is_missing(field, cattrs));
                 quote!((#default))
@@ -1790,12 +1817,9 @@ fn deserialize_internally_tagged_variant(
                 _serde::__private::Ok(#this::#variant_ident #default)
             }
         }
-        Style::Newtype => deserialize_untagged_newtype_variant(
-            variant_ident,
-            params,
-            &variant.fields[0],
-            &deserializer,
-        ),
+        Style::Newtype => deserialize_untagged_newtype(&variant.fields[0], &deserializer)
+            .map(quote_expr! { #this::#variant_ident })
+            .into(),
         Style::Struct => deserialize_struct(
             Some(variant_ident),
             params,
@@ -1821,11 +1845,11 @@ fn deserialize_untagged_variant(
         };
     }
 
+    let this = &params.this;
     let variant_ident = &variant.ident;
 
     match effective_style(variant) {
         Style::Unit => {
-            let this = &params.this;
             let type_name = params.type_name();
             let variant_name = variant.ident.to_string();
             let default = variant.fields.get(0).map(|field| {
@@ -1842,12 +1866,9 @@ fn deserialize_untagged_variant(
                 }
             }
         }
-        Style::Newtype => deserialize_untagged_newtype_variant(
-            variant_ident,
-            params,
-            &variant.fields[0],
-            &deserializer,
-        ),
+        Style::Newtype => deserialize_untagged_newtype(&variant.fields[0], &deserializer)
+            .map(quote_expr! { #this::#variant_ident })
+            .into(),
         Style::Tuple => deserialize_tuple(
             Some(variant_ident),
             params,
@@ -1898,26 +1919,18 @@ fn deserialize_externally_tagged_newtype(
     }
 }
 
-fn deserialize_untagged_newtype_variant(
-    variant_ident: &syn::Ident,
-    params: &Parameters,
-    field: &Field,
-    deserializer: &TokenStream,
-) -> Fragment {
-    let this = &params.this;
+fn deserialize_untagged_newtype(field: &Field, deserializer: &TokenStream) -> ResultFragment {
     let field_ty = field.ty;
     match field.attrs.deserialize_with() {
         None => {
             let span = field.original.span();
             let func = quote_spanned!(span=> <#field_ty as _serde::Deserialize>::deserialize);
-            quote_expr! {
-                _serde::__private::Result::map(#func(#deserializer), #this::#variant_ident)
-            }
+            quote_result! { (expr) => #func(#deserializer) }
         }
         Some(path) => {
-            quote_block! {
+            quote_result! { (block) =>
                 let __value: _serde::__private::Result<#field_ty, _> = #path(#deserializer);
-                _serde::__private::Result::map(__value, #this::#variant_ident)
+                __value
             }
         }
     }

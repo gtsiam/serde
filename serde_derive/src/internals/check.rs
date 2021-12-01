@@ -310,7 +310,16 @@ fn check_internal_tag_field_name_conflict(cx: &Ctxt, cont: &Container) {
                     }
                 }
             }
-            Style::Unit | Style::Newtype | Style::Tuple => {}
+            Style::Tuple => {
+                if !variant.attrs.other() {
+                    cx.error_spanned_by(
+                        variant.original,
+                        "#[serde(tag = \"...\")] cannot be used with tuple variants",
+                    );
+                    break;
+                }
+            }
+            Style::Unit | Style::Newtype => {}
         }
     }
 }

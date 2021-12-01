@@ -107,11 +107,11 @@ impl ResultFragment {
         match self {
             ResultFragment::Ok(expr) => ResultFragment::Ok({
                 let expr = Expr(expr);
-                quote_expr! { (#func)(#expr) }
+                quote_expr! { #func(#expr) }
             }),
             // ResultFragment::Err(expr) => ResultFragment::Ok({
             //     let expr = Expr(expr);
-            //     quote_expr! { (#func)(#expr) }
+            //     quote_expr! { #func(#expr) }
             // }),
             ResultFragment::Dyn(expr) => ResultFragment::Dyn({
                 let expr = Expr(expr);
