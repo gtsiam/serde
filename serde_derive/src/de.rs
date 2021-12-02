@@ -1235,18 +1235,15 @@ fn deserialize_externally_tagged_enum(
         .enumerate()
         .filter(|&(_, variant)| !variant.attrs.skip_deserializing())
         .map(|(i, variant)| {
-            let variant_name = field_i(i);
-
             let block = Match(deserialize_externally_tagged_variant(
                 params, variant, cattrs,
             ));
 
             let field_pat = if variant.attrs.other() {
-                match variant.fields.get(0) {
-                    Some(_) => quote!(__Field::__other(__tag)),
-                    None => quote!(__Field::__other),
-                }
+                let pat = variant.fields.get(0).map(|_| quote!((__tag)));
+                quote!(__Field::__other #pat)
             } else {
+                let variant_name = field_i(i);
                 quote!(__Field::#variant_name)
             };
 
@@ -1328,8 +1325,6 @@ fn deserialize_internally_tagged_enum(
         .enumerate()
         .filter(|&(_, variant)| !variant.attrs.skip_deserializing())
         .map(|(i, variant)| {
-            let variant_name = field_i(i);
-
             let block = Match(deserialize_internally_tagged_variant(
                 params,
                 variant,
@@ -1340,11 +1335,10 @@ fn deserialize_internally_tagged_enum(
             ));
 
             let field_pat = if variant.attrs.other() {
-                match variant.fields.get(0) {
-                    Some(_) => quote!(__Field::__other(__tag)),
-                    None => quote!(__Field::__other),
-                }
+                let pat = variant.fields.get(0).map(|_| quote!((__tag)));
+                quote!(__Field::__other #pat)
             } else {
+                let variant_name = field_i(i);
                 quote!(__Field::#variant_name)
             };
 
@@ -1390,7 +1384,13 @@ fn deserialize_adjacently_tagged_enum(
         .enumerate()
         .filter(|&(_, variant)| !variant.attrs.skip_deserializing())
         .map(|(i, variant)| {
-            let variant_index = field_i(i);
+            let field_pat = if variant.attrs.other() {
+                let pat = variant.fields.get(0).map(|_| quote!((__tag)));
+                quote!(__Field::__other #pat)
+            } else {
+                let variant_name = field_i(i);
+                quote!(__Field::#variant_name)
+            };
 
             let block = Match(deserialize_untagged_variant(
                 params,
@@ -1399,9 +1399,7 @@ fn deserialize_adjacently_tagged_enum(
                 quote!(__deserializer),
             ));
 
-            quote! {
-                __Field::#variant_index => #block
-            }
+            quote! { #field_pat => #block }
         })
         .collect();
 
@@ -1436,6 +1434,34 @@ fn deserialize_adjacently_tagged_enum(
         .filter_map(|(i, variant)| {
             let variant_index = field_i(i);
             let variant_ident = &variant.ident;
+
+            if variant.attrs.other() {
+                let (tag, arm) = match variant.fields.len() {
+                    0 => (
+                        false,
+                        quote! { _serde::__private::Ok(#this::#variant_ident) },
+                    ),
+                    1 => (
+                        true,
+                        quote! { _serde::__private::Ok(#this::#variant_ident(__tag)) },
+                    ),
+                    2 => {
+                        let span = variant.original.span();
+                        let func = quote_spanned!(span=> _serde::__private::de::missing_field);
+                        (
+                            true,
+                            quote! {
+                                #func(#content)
+                                .map(|__content| #this::#variant_ident(__tag, __content))
+                            },
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+
+                let capture = if tag { Some(quote!((__tag))) } else { None };
+                return Some(quote! { __Field::__other #capture => #arm });
+            }
 
             let arm = match variant.style {
                 Style::Unit => quote! {
@@ -1847,11 +1873,34 @@ fn deserialize_untagged_variant(
 
     let this = &params.this;
     let variant_ident = &variant.ident;
+    let type_name = params.type_name();
+    let variant_name = variant.ident.to_string();
+
+    if variant.attrs.other() {
+        match variant.fields.len() {
+            0 => (),
+            1 => {
+                return quote_expr! {
+                    match _serde::Deserializer::deserialize_any(
+                        #deserializer,
+                        _serde::__private::de::UntaggedUnitVisitor::new(#type_name, #variant_name)
+                    ) {
+                        _serde::__private::Ok(()) => _serde::__private::Ok(#this::#variant_ident(__tag)),
+                        _serde::__private::Err(__err) => _serde::__private::Err(__err),
+                    }
+                }
+            }
+            2 => {
+                return deserialize_untagged_newtype(&variant.fields[1], &deserializer)
+                    .map(quote_block! { |__content| #this::#variant_ident(__tag, __content) })
+                    .into()
+            }
+            _ => unreachable!("Variant length for #[serde(other)] checked in internals"),
+        }
+    }
 
     match effective_style(variant) {
         Style::Unit => {
-            let type_name = params.type_name();
-            let variant_name = variant.ident.to_string();
             let default = variant.fields.get(0).map(|field| {
                 let default = Expr(expr_is_missing(field, cattrs));
                 quote!((#default))
